@@ -7534,10 +7534,18 @@ static enum virgl_resource_fd_type vrend_pipe_resource_export_fd(UNUSED struct p
    struct vrend_resource *res = (struct vrend_resource *)pres;
 
    if (res->storage_bits & VREND_STORAGE_GBM_BUFFER) {
+#ifdef __ANDROID__
+      /* On Android, gbm_bo_get_fd() extracts the dmabuf fd directly from the
+       * AHardwareBuffer's native handle — no DRM device needed. */
+      *fd = gbm_bo_get_fd(res->gbm_bo);
+      if (*fd >= 0)
+         return VIRGL_RESOURCE_FD_DMABUF;
+#else
       int ret = virgl_gbm_export_fd(gbm->device,
                                     gbm_bo_get_handle(res->gbm_bo).u32, fd);
       if (!ret)
          return VIRGL_RESOURCE_FD_DMABUF;
+#endif
    }
 #endif
 
