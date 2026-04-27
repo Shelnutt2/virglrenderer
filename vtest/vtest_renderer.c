@@ -36,6 +36,8 @@
 
 #include "virgl_hw.h"
 #include "virglrenderer.h"
+#include "virgl_resource.h"
+#include <errno.h>
 
 #include <sys/uio.h>
 #include <sys/socket.h>
@@ -1076,6 +1078,55 @@ static int vtest_create_resource_internal(struct vtest_context *ctx,
    if (shm_size) {
       int fd;
 
+#ifdef __ANDROID__
+      /* Try to export AHB-backed dmabuf fd for scanout resources */
+      {
+         int export_fd = -1;
+         uint32_t fd_type = 0;
+         fprintf(stderr, "[vtest-ahb] Trying AHB export for res_id=%d shm_size=%zu\n",
+                 res->res_id, (size_t)shm_size);
+         int export_ret = virgl_renderer_resource_export_blob(res->res_id,
+                                                               &fd_type, &export_fd);
+         fprintf(stderr, "[vtest-ahb] export_blob: ret=%d fd_type=%u export_fd=%d\n",
+                 export_ret, fd_type, export_fd);
+         if (!export_ret && (fd_type == VIRGL_RESOURCE_FD_DMABUF || fd_type == VIRGL_RESOURCE_FD_OPAQUE) && export_fd >= 0) {
+            /* AHB-backed resource — send the dmabuf fd */
+            fprintf(stderr, "[vtest-ahb] AHB export SUCCESS: res_id=%d fd=%d fd_type=%u\n",
+                    res->res_id, export_fd, fd_type);
+            ret = vtest_send_fd(ctx->out_fd, export_fd);
+            if (ret < 0) {
+               close(export_fd);
+               vtest_unref_resource(res);
+               return report_failed_call("vtest_send_fd", ret);
+            }
+
+            /* Still need an IOV for virglrenderer's transfer path (fallback).
+             * mmap the dmabuf — AHB dmabufs are CPU-mappable on Android. */
+            void *ptr = mmap(NULL, shm_size, PROT_READ | PROT_WRITE,
+                             MAP_SHARED, export_fd, 0);
+            if (ptr == MAP_FAILED) {
+               fprintf(stderr, "[vtest-ahb] AHB mmap failed errno=%d, using separate shm\n", errno);
+               /* Fallback: create a separate shm region for IOV */
+               int shm_fd = vtest_create_resource_setup_shm(res, shm_size);
+               if (shm_fd >= 0)
+                  close(shm_fd);
+               /* res->iov already set up by vtest_create_resource_setup_shm */
+            } else {
+               fprintf(stderr, "[vtest-ahb] AHB mmap OK: %p size=%zu\n", ptr, (size_t)shm_size);
+               res->iov.iov_base = ptr;
+               res->iov.iov_len = shm_size;
+            }
+            close(export_fd);
+
+            virgl_renderer_resource_attach_iov(res->res_id, &res->iov, 1);
+            goto resource_done;
+         }
+         fprintf(stderr, "[vtest-ahb] export_blob failed or not DMABUF, falling back to memfd\n");
+         if (export_fd >= 0)
+            close(export_fd);
+      }
+#endif
+
       fd = vtest_create_resource_setup_shm(res, shm_size);
       if (fd < 0) {
          vtest_unref_resource(res);
@@ -1095,6 +1146,9 @@ static int vtest_create_resource_internal(struct vtest_context *ctx,
       virgl_renderer_resource_attach_iov(res->res_id, &res->iov, 1);
    }
 
+#ifdef __ANDROID__
+resource_done:
+#endif
    util_hash_table_set(ctx->resource_table, intptr_to_pointer(res->res_id), res);
 
    return 0;
