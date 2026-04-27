@@ -54,6 +54,14 @@
 #ifdef ENABLE_GBM
 #include "vrend_winsys_gbm.h"
 #endif
+#ifdef __ANDROID__
+#include <android/hardware_buffer.h>
+#include <EGL/egl.h>
+#include <EGL/eglext.h>
+#ifndef EGL_NATIVE_BUFFER_ANDROID
+#define EGL_NATIVE_BUFFER_ANDROID 0x3140
+#endif
+#endif
 #include "virgl_util.h"
 
 #define EGL_KHR_SURFACELESS_CONTEXT            BIT(0)
@@ -877,6 +885,33 @@ void virgl_egl_image_destroy(struct virgl_egl *egl, void *image)
 #ifdef ENABLE_MINIGBM_ALLOCATION
 void *virgl_egl_image_from_gbm_bo(struct virgl_egl *egl, struct gbm_bo *bo)
 {
+#ifdef __ANDROID__
+   /* On Android, bypass dmabuf export — create EGL image directly from AHB.
+    * This avoids virgl_gbm_export_fd() which needs drmPrimeHandleToFD. */
+   AHardwareBuffer *ahb = gbm_bo_get_ahb(bo);
+   if (!ahb) {
+      virgl_error("gbm_bo has no AHardwareBuffer\n");
+      return NULL;
+   }
+
+   EGLClientBuffer client_buf = eglGetNativeClientBufferANDROID(ahb);
+   if (!client_buf) {
+      virgl_error("eglGetNativeClientBufferANDROID failed\n");
+      return NULL;
+   }
+
+   EGLint attribs[] = { EGL_NONE };
+   EGLImageKHR image = eglCreateImageKHR(egl->egl_display, EGL_NO_CONTEXT,
+                                          EGL_NATIVE_BUFFER_ANDROID,
+                                          client_buf, attribs);
+   if (image == EGL_NO_IMAGE_KHR) {
+      virgl_error("eglCreateImageKHR(EGL_NATIVE_BUFFER_ANDROID) failed: 0x%x\n",
+                  eglGetError());
+      return NULL;
+   }
+
+   return (void *)image;
+#else
    int ret;
    void *image = NULL;
    int fds[VIRGL_GBM_MAX_PLANES] = {-1, -1, -1, -1};
@@ -914,6 +949,7 @@ out_close:
       close(fds[plane]);
 
    return image;
+#endif
 }
 
 void *virgl_egl_aux_plane_image_from_gbm_bo(struct virgl_egl *egl, struct gbm_bo *bo, int plane)
