@@ -3,6 +3,23 @@
  * SPDX-License-Identifier: MIT
  */
 
+/*
+ * Android API 29 does not expose memfd_create() in <sys/mman.h>
+ * (it was added in API 30).  Use the raw syscall instead.
+ */
+#ifdef __ANDROID__
+#include <sys/syscall.h>
+#include <unistd.h>
+#ifndef __NR_memfd_create
+/* aarch64 syscall number -- should be defined by <asm/unistd.h> */
+#define __NR_memfd_create 279
+#endif
+static inline int android_memfd_create(const char *name, unsigned int flags) {
+   return syscall(__NR_memfd_create, name, flags);
+}
+#define memfd_create android_memfd_create
+#endif
+
 #include "vkr_device_memory.h"
 
 #include "venus-protocol/vn_protocol_renderer_transport.h"
