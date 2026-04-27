@@ -58,9 +58,84 @@
 #include <android/hardware_buffer.h>
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
+#include <sys/stat.h>
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <unistd.h>
+#include <string.h>
+#include <inttypes.h>
 #ifndef EGL_NATIVE_BUFFER_ANDROID
 #define EGL_NATIVE_BUFFER_ANDROID 0x3140
 #endif
+
+#define AHB_MSG_REGISTER   0x01
+#define AHB_MSG_UNREGISTER 0x02
+
+static int g_ahb_socket_fd = -1;
+static int g_ahb_socket_tried = 0;
+
+/* Lazily connect to the AHB registry socket. Returns fd or -1. */
+static int ahb_socket_get_fd(void) {
+    if (g_ahb_socket_fd >= 0) return g_ahb_socket_fd;
+    if (g_ahb_socket_tried) return -1;
+    g_ahb_socket_tried = 1;
+
+    const char *path = getenv("AHB_REGISTRY_SOCKET");
+    if (!path || !path[0]) {
+        fprintf(stderr, "[ahb-reg] AHB_REGISTRY_SOCKET not set\n");
+        return -1;
+    }
+
+    int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (fd < 0) {
+        fprintf(stderr, "[ahb-reg] socket() failed: %s\n", strerror(errno));
+        return -1;
+    }
+
+    struct sockaddr_un addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sun_family = AF_UNIX;
+    strncpy(addr.sun_path, path, sizeof(addr.sun_path) - 1);
+
+    if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+        fprintf(stderr, "[ahb-reg] connect(%s) failed: %s\n", path, strerror(errno));
+        close(fd);
+        return -1;
+    }
+
+    fprintf(stderr, "[ahb-reg] connected to %s (fd=%d)\n", path, fd);
+    g_ahb_socket_fd = fd;
+    return fd;
+}
+
+static void ahb_socket_send_register(uint64_t inode, AHardwareBuffer *ahb) {
+    int fd = ahb_socket_get_fd();
+    if (fd < 0) return;
+
+    uint8_t tag = AHB_MSG_REGISTER;
+    uint8_t inode_buf[8];
+    memcpy(inode_buf, &inode, 8);  /* LE on ARM */
+
+    if (write(fd, &tag, 1) != 1 ||
+        write(fd, inode_buf, 8) != 8) {
+        fprintf(stderr, "[ahb-reg] write failed: %s\n", strerror(errno));
+        close(fd);
+        g_ahb_socket_fd = -1;
+        g_ahb_socket_tried = 0;  /* allow reconnect */
+        return;
+    }
+
+    int ret = AHardwareBuffer_sendHandleToUnixSocket(ahb, fd);
+    if (ret != 0) {
+        fprintf(stderr, "[ahb-reg] sendHandleToUnixSocket failed (ret=%d)\n", ret);
+        close(fd);
+        g_ahb_socket_fd = -1;
+        g_ahb_socket_tried = 0;
+        return;
+    }
+
+    fprintf(stderr, "[ahb-reg] registered inode=%" PRIu64 "\n", inode);
+}
 #endif
 #include "virgl_util.h"
 
@@ -908,6 +983,16 @@ void *virgl_egl_image_from_gbm_bo(struct virgl_egl *egl, struct gbm_bo *bo)
       virgl_error("eglCreateImageKHR(EGL_NATIVE_BUFFER_ANDROID) failed: 0x%x\n",
                   eglGetError());
       return NULL;
+   }
+
+   /* Send AHB to compositor's registry over Unix socket. */
+   int export_fd = gbm_bo_get_fd(bo);
+   if (export_fd >= 0) {
+      struct stat st;
+      if (fstat(export_fd, &st) == 0) {
+         ahb_socket_send_register((uint64_t)st.st_ino, ahb);
+      }
+      close(export_fd);
    }
 
    return (void *)image;
