@@ -31,7 +31,11 @@
 #include <fcntl.h>
 #include <stdlib.h>
 #include <string.h>
+#ifndef __ANDROID__
 #include <xf86drm.h>
+#else
+#include <errno.h>
+#endif
 #include <unistd.h>
 #include <sys/mman.h>
 
@@ -113,6 +117,7 @@ static const struct format_conversion conversions[] = {
     { GBM_FORMAT_YVU420, VIRGL_FORMAT_YV12},
 };
 
+#ifndef __ANDROID__
 static int rendernode_open(void)
 {
    DIR *dir;
@@ -172,6 +177,7 @@ out:
    closedir(dir);
    return fd;
 }
+#endif /* !__ANDROID__ */
 
 static const struct planar_layout *layout_from_format(uint32_t format)
 {
@@ -276,6 +282,12 @@ struct virgl_gbm *virgl_gbm_init(int fd)
       if (gbm->device)
          return gbm;
 #endif
+#ifdef __ANDROID__
+      /* Android GBM shim accepts fd=-1 — no rendernode needed */
+      gbm->device = gbm_create_device(-1);
+      if (!gbm->device)
+         goto out_error;
+#else
       gbm->fd = rendernode_open();
       if (gbm->fd < 0)
          goto out_error;
@@ -285,6 +297,7 @@ struct virgl_gbm *virgl_gbm_init(int fd)
          close(gbm->fd);
          goto out_error;
       }
+#endif
    } else {
       gbm->device = gbm_create_device(fd);
       if (!gbm->device)
@@ -561,6 +574,12 @@ uint32_t virgl_gbm_get_map_info(struct gbm_bo *bo) {
 
 int virgl_gbm_export_fd(struct gbm_device *gbm, uint32_t handle, int32_t *out_fd)
 {
+#ifdef __ANDROID__
+   (void)gbm;
+   (void)handle;
+   (void)out_fd;
+   return -ENOSYS;
+#else
    int ret;
    ret = drmPrimeHandleToFD(gbm_device_get_fd(gbm), handle, DRM_CLOEXEC | DRM_RDWR, out_fd);
    // Kernels with older DRM core versions block DRM_RDWR but give a
@@ -569,6 +588,7 @@ int virgl_gbm_export_fd(struct gbm_device *gbm, uint32_t handle, int32_t *out_fd
       ret = drmPrimeHandleToFD(gbm_device_get_fd(gbm), handle, DRM_CLOEXEC, out_fd);
 
    return ret;
+#endif
 }
 
 int virgl_gbm_get_plane_width(struct gbm_bo *bo, int plane) {
