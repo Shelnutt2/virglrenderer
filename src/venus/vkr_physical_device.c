@@ -61,6 +61,13 @@ vkr_gbm_device_init_once(void)
 {
    UNUSED int gbm_fd;
    vkr_gbm_dev = minigbm_create_default_device(&gbm_fd);
+#ifdef __ANDROID__
+   if (!vkr_gbm_dev) {
+      /* Android gbm-shim implements gbm_create_device() with AHB backing.
+       * It accepts fd=-1 since no real DRM render node exists. */
+      vkr_gbm_dev = gbm_create_device(-1);
+   }
+#endif
    if (!vkr_gbm_dev) {
       vkr_log("minigbm_create_default_device failed");
       exit(-1);
