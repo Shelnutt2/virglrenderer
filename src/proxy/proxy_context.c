@@ -300,6 +300,10 @@ proxy_context_submit_cmd(struct virgl_context *base, const void *buffer, size_t 
 static bool
 validate_resource_fd_shm(int fd, uint64_t expected_size)
 {
+#ifndef __ANDROID__
+   /* Android kernels may not support F_GET_SEALS on memfds created via
+    * syscall (returns -1/EINVAL). Skip seal validation — size check is
+    * sufficient for our single-app trust model. */
    static const int blocked_seals = F_SEAL_WRITE;
 
    const int seals = fcntl(fd, F_GET_SEALS);
@@ -307,6 +311,7 @@ validate_resource_fd_shm(int fd, uint64_t expected_size)
       proxy_log("failed to validate shm seals(%d): blocked(%d)", seals, blocked_seals);
       return false;
    }
+#endif
 
    const uint64_t size = lseek(fd, 0, SEEK_END);
    if (size != expected_size) {
@@ -321,7 +326,15 @@ validate_resource_fd_shm(int fd, uint64_t expected_size)
 static inline int
 add_required_seals_to_fd(int fd)
 {
+#ifdef __ANDROID__
+   /* Android kernels may reject F_ADD_SEALS with EINVAL even on memfds
+    * created with MFD_ALLOW_SEALING.  Sealing is security hardening
+    * (prevents shmem resize after setup) -- not required for correctness. */
+   (void)fd;
+   return 0;
+#else
    return fcntl(fd, F_ADD_SEALS, F_SEAL_SEAL | F_SEAL_SHRINK | F_SEAL_GROW);
+#endif
 }
 
 static int
