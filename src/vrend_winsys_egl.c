@@ -188,10 +188,19 @@ static bool virgl_egl_add_extensions(struct virgl_egl *egl, const char *extensio
 
 static bool virgl_egl_check_extensions(struct virgl_egl *egl)
 {
+#ifdef __ANDROID__
+   /* Android EGL 1.5 supports surfaceless contexts as a core feature,
+    * not as an extension. Only check for EGL_KHR_create_context. */
+   if (!has_bit(egl->extension_bits, EGL_KHR_CREATE_CONTEXT)) {
+      virgl_error("Missing EGL_KHR_create_context\n");
+      return false;
+   }
+#else
    if (!has_bits(egl->extension_bits, EGL_KHR_SURFACELESS_CONTEXT | EGL_KHR_CREATE_CONTEXT)) {
       virgl_error("Missing EGL_KHR_surfaceless_context or EGL_KHR_create_context\n");
       return false;
    }
+#endif
 
    return true;
 }
@@ -335,6 +344,21 @@ struct virgl_egl *virgl_egl_init(EGLNativeDisplayType display_id, bool surfacele
 
    if (surfaceless)
       conf_att[1] = EGL_PBUFFER_BIT;
+
+#ifdef __ANDROID__
+   /* Android EGL doesn't support EGL_PLATFORM_SURFACELESS_MESA or
+    * EGL_PLATFORM_GBM_KHR. Use the default display directly. */
+   {
+      const char *client_exts = eglQueryString(NULL, EGL_EXTENSIONS);
+      if (client_exts)
+         virgl_egl_add_extensions(egl, client_exts);
+   }
+   egl->egl_display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
+   if (!egl->egl_display)
+      goto fail;
+   goto android_egl_display_ready;
+#endif
+
 #ifdef ENABLE_GBM
    if (!gbm && (!surfaceless || !has_egl_base))
       goto fail;
@@ -386,6 +410,10 @@ struct virgl_egl *virgl_egl_init(EGLNativeDisplayType display_id, bool surfacele
          goto fail;
    }
 
+#ifdef __ANDROID__
+android_egl_display_ready:
+#endif
+
    success = eglInitialize(egl->egl_display, &major, &minor);
    if (!success)
       goto fail;
@@ -402,6 +430,11 @@ struct virgl_egl *virgl_egl_init(EGLNativeDisplayType display_id, bool surfacele
 
    if (!virgl_egl_add_extensions(egl, extensions))
       goto fail;
+
+#ifdef __ANDROID__
+   /* Force surfaceless context support -- Android EGL 1.5 has it as core */
+   egl->extension_bits |= EGL_KHR_SURFACELESS_CONTEXT;
+#endif
 
    if (!virgl_egl_check_extensions(egl))
       goto fail;
